@@ -1,44 +1,100 @@
+import { Connection, PublicKey } from "@solana/web3.js";
+import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import {
-    Connection,
-    Keypair,
-    PublicKey,
-    SystemProgram,
-    Transaction,
-    TransactionInstruction,
-  } from '@solana/web3.js';
-  
-  export const removeLiquidity = async (
-    connection: Connection,
-    userWallet: Keypair,
-    liquidityTokenAccount: PublicKey, // The account holding your liquidity tokens
-    liquidityTokenMint: PublicKey, // The mint of your liquidity tokens
-    liquidityTokenAmount: number, // The amount of liquidity tokens to remove
-    poolTokenA: PublicKey, // The token A account in the pool
-    poolTokenB: PublicKey, // The token B account in the pool
-    slippage: number // The maximum slippage allowed
-  ) => {
-    // Fetch the pool account address from Raydium or compute it based on the token accounts
-  
-    // Construct the remove liquidity instruction
-    const instructionData = Buffer.from([/* your instruction data */]);
-    const instruction = new TransactionInstruction({
-      keys: [
-        { pubkey: userWallet.publicKey, isSigner: true, isWritable: true },
-        { pubkey: liquidityTokenAccount, isSigner: false, isWritable: true },
-        { pubkey: liquidityTokenMint, isSigner: false, isWritable: false },
-        { pubkey: poolTokenA, isSigner: false, isWritable: true },
-        { pubkey: poolTokenB, isSigner: false, isWritable: true },
-        // Add any other necessary keys
-      ],
-      programId: new PublicKey('Your Raydium Program ID'),
-      data: instructionData,
+  TokenAccount,
+  SPL_ACCOUNT_LAYOUT,
+  LIQUIDITY_STATE_LAYOUT_V4,
+} from "@raydium-io/raydium-sdk";
+import { OpenOrders } from "@project-serum/serum";
+import BN from "bn.js";
+
+async function getTokenAccounts(connection: Connection, owner: PublicKey) {
+  const tokenResp = await connection.getTokenAccountsByOwner(owner, {
+    programId: TOKEN_PROGRAM_ID,
+  });
+
+  const accounts: TokenAccount[] = [];
+  for (const { pubkey, account } of tokenResp.value) {
+    accounts.push({
+      pubkey,
+      accountInfo: SPL_ACCOUNT_LAYOUT.decode(account.data),
+      programId: TOKEN_PROGRAM_ID,
     });
-  
-    // Construct the transaction
-    const transaction = new Transaction().add(instruction);
-  
-    // Sign and send the transaction
-    const signature = await connection.sendTransaction(transaction, [userWallet]);
-  
-    return signature;
-  };
+  }
+
+  return accounts;
+}
+
+const rpcUrl = 'https://api.mainnet-beta.solana.com'
+const SOL_USDC_POOL_ID = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2";
+const OPENBOOK_PROGRAM_ID = new PublicKey(
+  "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX"
+);
+
+export async function parsePoolInfo() {
+  const connection = new Connection(rpcUrl, "confirmed");
+  const owner = new PublicKey("VnxDzsZ7chE88e9rB6UKztCt2HUwrkgCTx8WieWf5mM");
+
+  const tokenAccounts = await getTokenAccounts(connection, owner);
+
+  const info = await connection.getAccountInfo(new PublicKey(SOL_USDC_POOL_ID));
+  if (!info) return;
+
+  const poolState = LIQUIDITY_STATE_LAYOUT_V4.decode(info.data);
+  const openOrders = await OpenOrders.load(
+    connection,
+    poolState.openOrders,
+    OPENBOOK_PROGRAM_ID
+  );
+
+  const baseDecimal = 10 ** poolState.baseDecimal.toNumber(); // e.g. 10 ^ 6
+  const quoteDecimal = 10 ** poolState.quoteDecimal.toNumber();
+
+  const baseTokenAmount = await connection.getTokenAccountBalance(
+    poolState.baseVault
+  );
+  const quoteTokenAmount = await connection.getTokenAccountBalance(
+    poolState.quoteVault
+  );
+
+  const basePnl = poolState.baseNeedTakePnl.toNumber() / baseDecimal;
+  const quotePnl = poolState.quoteNeedTakePnl.toNumber() / quoteDecimal;
+
+  const openOrdersBaseTokenTotal =
+    openOrders.baseTokenTotal.toNumber() / baseDecimal;
+  const openOrdersQuoteTokenTotal =
+    openOrders.quoteTokenTotal.toNumber() / quoteDecimal;
+
+  const base =
+    (baseTokenAmount.value?.uiAmount || 0) + openOrdersBaseTokenTotal - basePnl;
+  const quote =
+    (quoteTokenAmount.value?.uiAmount || 0) +
+    openOrdersQuoteTokenTotal -
+    quotePnl;
+
+  const denominator = new BN(10).pow(poolState.baseDecimal);
+
+  const addedLpAccount = tokenAccounts.find((a) =>
+    a.accountInfo.mint.equals(poolState.lpMint)
+  );
+
+  return [
+    "SOL_USDC pool info:",
+    "pool total base " + base,
+    "pool total quote " + quote,
+
+    "base vault balance " + baseTokenAmount.value.uiAmount,
+    "quote vault balance " + quoteTokenAmount.value.uiAmount,
+
+    "base tokens in openorders " + openOrdersBaseTokenTotal,
+    "quote tokens in openorders  " + openOrdersQuoteTokenTotal,
+
+    "base token decimals " + poolState.baseDecimal.toNumber(),
+    "quote token decimals " + poolState.quoteDecimal.toNumber(),
+    "total lp " + poolState.lpReserve.div(denominator).toString(),
+
+    "addedLpAmount " +
+      (addedLpAccount?.accountInfo.amount.toNumber() || 0) / baseDecimal
+  ];
+}
+

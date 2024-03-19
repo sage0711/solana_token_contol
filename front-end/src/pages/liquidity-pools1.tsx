@@ -1,5 +1,9 @@
 import React, { useEffect, useState } from 'react';
+import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { Connection, PublicKey } from '@solana/web3.js';
+import {TokenAccount, SPL_ACCOUNT_LAYOUT} from '@raydium-io/raydium-sdk'
+
+const rpcURL = 'https://api.mainnet-beta.solana.com'
 
 const LiquidityPoolList: React.FC<{ ownerPublicKey: string }> = ({ ownerPublicKey }) => {
   const [liquidityPools, setLiquidityPools] = useState<TokenAccount[]>([]);
@@ -7,15 +11,18 @@ const LiquidityPoolList: React.FC<{ ownerPublicKey: string }> = ({ ownerPublicKe
   useEffect(() => {
     const fetchLiquidityPools = async () => {
       try {
-        const connection = new Connection('https://api.mainnet-beta.solana.com');
+        const connection = new Connection(rpcURL, "confirmed");
         const owner = new PublicKey(ownerPublicKey);
-        const tokenResp = await connection.getTokenAccountsByOwner(owner);
+        const tokenResp = await connection.getTokenAccountsByOwner(owner, {
+          programId: TOKEN_PROGRAM_ID,
+        });
         
         const pools: TokenAccount[] = [];
         for (const { pubkey, account } of tokenResp.value) {
           pools.push({
             pubkey,
-            accountInfo: account.data,
+            accountInfo: SPL_ACCOUNT_LAYOUT.decode(account.data),
+            programId: TOKEN_PROGRAM_ID,
           });
         }
         
